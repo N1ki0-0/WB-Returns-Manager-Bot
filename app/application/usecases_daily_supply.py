@@ -2,7 +2,9 @@ from dataclasses import dataclass
 from collections import defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+from collections import defaultdict
+import asyncio
+from app.domain.title_normalizer import normalize_phone_title
 @dataclass
 class DailySupplyResult:
     supply_id: str | None
@@ -47,6 +49,7 @@ class CreateDailySupplyUseCase:
         notifier,
         tz: str,
         enabled: bool,
+        batch_size: int = 5, batch_pause_sec: int = 20, cards_limit: int = 100
     ):
         self._mp = marketplace_client
         self._content = content_client
@@ -55,6 +58,8 @@ class CreateDailySupplyUseCase:
         self._tz = tz
         self._enabled = enabled
         self._cache: dict[int, tuple[str, str]] = {}  # nmId -> (title, color)
+        self._batch_size = batch_size
+        self._batch_pause_sec = batch_pause_sec
 
     async def run(self) -> DailySupplyResult:
         if not self._enabled:
@@ -93,49 +98,65 @@ class CreateDailySupplyUseCase:
 
             await self._mp.add_orders_to_supply(supply_id, order_ids)
 
-            # Агрегация: nmId -> qty (обычно qty=1 на заказ, но оставим расширяемо)
-            agg: dict[tuple[str, str], int] = defaultdict(int)
+            nm_ids_needed = []
+            for o in orders:
+                nm_id = int(o["nmId"])
+                if nm_id not in self._cache:
+                    nm_ids_needed.append(nm_id)
+
+            # 2) резолвим карточки пакетами: 5 запросов -> пауза 20 сек
+            cards_errors = 0
+            for i in range(0, len(nm_ids_needed), self._batch_size):
+                batch = nm_ids_needed[i:i + self._batch_size]
+
+                # делаем последовательно (предсказуемо по лимитам); можно параллельно, но вы просили “не штурмовать”
+                for nm_id in batch:
+                    try:
+                        # fallback_color нам больше не нужен (цвет берем из title)
+                        title, _color = await self._get_title_and_color(nm_id, fallback_color="")
+                        self._cache[nm_id] = (title, "")  # цвет не используем
+                    except Exception:
+                        cards_errors += 1
+                        self._cache[nm_id] = (f"UNKNOWN_{nm_id}", "")
+
+                # пауза между пачками, если остались ещё
+                if i + self._batch_size < len(nm_ids_needed):
+                    await asyncio.sleep(self._batch_pause_sec)
+
+            # 3) агрегация по нормализованному имени (а не nmId)
+            agg: dict[str, int] = defaultdict(int)
+            unknown_count = 0
             total = 0
 
-            # 1) Подготовим справочник nmId -> (title, color) одним проходом по уникальным nmId
-            unique_nmids = sorted({int(o["nmId"]) for o in orders})
-            cards_errors = 0
-            resolved: dict[int, tuple[str, str]] = {}
-
-            for nm_id in unique_nmids:
-                # fallback если карточки не получим
-                resolved[nm_id] = (f"nmId {nm_id}", "")
-
-                try:
-                    title, color = await self._get_title_and_color(nm_id, fallback_color="")
-                    resolved[nm_id] = (title, color)
-                except Exception:
-                    cards_errors += 1
-                    # оставляем fallback; НЕ валим весь job
-
-            # 2) Агрегируем заказы, используя resolved + fallback на colorCode
             for o in orders:
                 nm_id = int(o["nmId"])
                 qty = int(o.get("quantity", 1))
                 total += qty
 
-                title, color = resolved.get(nm_id, (f"nmId {nm_id}", ""))
+                title = self._cache.get(nm_id, (f"UNKNOWN_{nm_id}", ""))[0]
+                if title.startswith("UNKNOWN_"):
+                    unknown_count += qty
+                    continue
 
-                # если цвет не удалось получить из карточки — пробуем взять из заказа
-                if not color:
-                    color = str(o.get("colorCode", "")).strip()
-
-                color_short = _short_color_name(color) if color else ""
-                key = (title, color_short)
+                key = normalize_phone_title(title)
                 agg[key] += qty
-            lines = []
-            lines.append(f"{total} шт")
-            for (title, color_short), qty in sorted(agg.items(), key=lambda x: (-x[1], x[0][0], x[0][1])):
-                suffix = f" {color_short}" if color_short else ""
-                lines.append(f"{title}{suffix} - {qty} шт.")
+
+            # 4) формируем лёгкочитаемый список
+            lines = [f"{total} шт"]
+
+            for name, qty in sorted(agg.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(f"{name} — {qty}")
+
+            if unknown_count > 0:
+                lines.append("")
+                lines.append(f"Не распознано (карточка не получена): {unknown_count} шт.")
+
+            if cards_errors > 0:
+                lines.append(f"Примечание: были ошибки Content API при получении карточек: {cards_errors}.")
 
             text = f"WB Supply {day_key}\nСоздана поставка: {supply_id}\n\n" + "\n".join(lines)
             await self._notifier.notify_admins(text)
+
             await self._repo.mark_ok(
                 day_key,
                 supply_id=supply_id,
@@ -143,6 +164,7 @@ class CreateDailySupplyUseCase:
                 order_count=len(order_ids),
                 report_text=text,
             )
+
             return DailySupplyResult(supply_id, total, lines)
 
         except Exception as e:

@@ -44,7 +44,7 @@ class WbContentClient:
     async def find_card_by_text(self, text: str, locale: str = "ru") -> dict[str, Any]:
         payload = {
             "settings": {
-                "cursor": {"limit": 10},
+                "cursor": {"limit": 150},
                 "filter": {"textSearch": text, "withPhoto": -1},
             }
         }

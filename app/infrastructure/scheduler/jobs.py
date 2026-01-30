@@ -6,7 +6,7 @@ def register_jobs(
     returns_interval_minutes: int,
     daily_supply_usecase=None,
     daily_hour: int = 9,
-    daily_minute: int = 30,
+    daily_minute: int = 55,
     timezone: str = "Europe/Amsterdam",
 ):
     # Возвраты — interval
