@@ -1,7 +1,7 @@
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, DateTime, Boolean, Text
-from sqlalchemy import String, DateTime, Text, Integer
+from sqlalchemy.orm import DeclarativeBase, mapped_column
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Integer, String, DateTime, Column, Text, Boolean
+from datetime import datetime
 class Base(DeclarativeBase):
     pass
 
@@ -21,6 +21,7 @@ class DailySupplyRun(Base):
     order_count: Mapped[int] = mapped_column(default=0, nullable=False)
     report_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    instance_name = Column(String, index=True, nullable=False, default="default")
 
 class FeedbackClone(Base):
     __tablename__ = "feedback_clone"
@@ -30,3 +31,24 @@ class FeedbackClone(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)  # CLONED / FAILED
     new_nm_id: Mapped[str | None] = mapped_column(String, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+class Order(Base):
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, index=True, nullable=False)  # id из WB
+    nm_id = Column(Integer, index=True, nullable=False)
+    quantity = Column(Integer, default=1)
+    offer_name = Column(String, nullable=True)
+    vendor_code = Column(String, nullable=True)
+    supply_id = Column(String, index=True, nullable=True)  # wb supply id when assigned
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    instance_name = Column(String, index=True, nullable=False, default="default")
+
+class ProductCache(Base):
+    __tablename__ = "product_cache"
+    nm_id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=True)
+    color = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    instance_name = Column(String, index=True, nullable=False, primary_key = True,default="default")

@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.tests
-    command: ["pytest", "-q"]
+    command: [ "pytest", "-q" ]
+    env_file:
+      - .env
     environment:
       - PYTHONPATH=/app

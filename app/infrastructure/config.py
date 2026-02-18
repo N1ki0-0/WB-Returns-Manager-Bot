@@ -1,45 +1,100 @@
-from dataclasses import dataclass
+# app/infrastructure/config.py
 import os
+import json
+from dataclasses import dataclass
+from typing import List, Optional, Any
 
-@dataclass(frozen=True)
-class Settings:
+@dataclass
+class AccountConfig:
+    name: str
     telegram_token: str
     wb_token: str
-    admin_ids: set[int]
+    admin_ids: List[int]
+
+@dataclass
+class Settings:
+    accounts: List[AccountConfig]
     db_url: str
+    daily_supply_tz: str
     timezone: str
-    daily_supply_enabled: bool
+    interval_minutes: int
+    delay_days: int
     daily_supply_hour: int
     daily_supply_minute: int
-
-    auto_enabled: bool
-    delay_days: int
-    interval_minutes: int
+    wb_content_max_parallel: int
     default_reject_comment: str
 
-def _bool(v: str) -> bool:
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+def _parse_accounts(raw: Optional[str]) -> List[AccountConfig]:
+    if not raw:
+        return []
+    raw = raw.strip()
+    # Если передан путь к файлу - попробуем загрузить
+    if os.path.exists(raw):
+        with open(raw, "r", encoding="utf-8") as f:
+            arr = json.load(f)
+    else:
+        try:
+            arr = json.loads(raw)
+        except Exception as e:
+            raise RuntimeError("ACCOUNTS must be JSON string or path to JSON file: " + str(e))
 
-def load_settings() -> Settings:
-    admin_ids = set()
-    raw_admins = os.getenv("ADMIN_TELEGRAM_IDS", "").strip()
-    if raw_admins:
-        admin_ids = {int(x.strip()) for x in raw_admins.split(",") if x.strip()}
+    accounts: List[AccountConfig] = []
+    for a in arr:
+        name = a.get("name") or a.get("instance") or a.get("instance_name") or a.get("id")
+        if not name:
+            raise RuntimeError("Each account in ACCOUNTS must have a 'name' field")
+        admin_ids = a.get("admin_ids") or a.get("adminIds") or []
+        # ensure ints
+        admin_ids = [int(x) for x in admin_ids if str(x).strip() != ""]
+        accounts.append(AccountConfig(
+            name=str(name),
+            telegram_token=str(a["telegram_token"]),
+            wb_token=str(a["wb_token"]),
+            admin_ids=admin_ids
+        ))
+    return accounts
 
-    return Settings(
-        telegram_token=os.environ["TELEGRAM_BOT_TOKEN"],
-        wb_token=os.environ["WB_API_TOKEN"],
-        admin_ids=admin_ids,
-        db_url=os.getenv("DB_URL", "sqlite+aiosqlite:///./data.db"),
-        auto_enabled=_bool(os.getenv("AUTO_ACTION_ENABLED", "true")),
-        delay_days=int(os.getenv("AUTO_ACTION_DELAY_DAYS", "3")),
-        interval_minutes=int(os.getenv("SCHED_INTERVAL_MINUTES", "60")),
-        default_reject_comment=os.getenv(
-            "DEFAULT_REJECT_COMMENT",
-            "Заявка отклонена автоматически."
-        ).replace("\\n", "\n"),
-        timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
-        daily_supply_enabled=_bool(os.getenv("DAILY_SUPPLY_ENABLED", "true")),
-        daily_supply_hour=int(os.getenv("DAILY_SUPPLY_HOUR", "9")),
-        daily_supply_minute=int(os.getenv("DAILY_SUPPLY_MINUTE", "30")),
+def load_settings(env_file: str = ".env") -> Settings:
+    # If .env file exists, load it into env (simple key=value)
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            # не критично — продолжим читать из окружения
+            pass
+
+    accounts_raw = os.getenv("ACCOUNTS")
+    accounts = _parse_accounts(accounts_raw)
+
+    def gint(name: str, default: int) -> int:
+        v = os.getenv(name)
+        return int(v) if v and v.strip() != "" else default
+
+    def gstr(name: str, default: str) -> str:
+        v = os.getenv(name)
+        return v if v and v.strip() != "" else default
+
+    s = Settings(
+        accounts=accounts,
+        db_url=gstr("DB_URL", "sqlite+aiosqlite:///./data/data.db"),
+        daily_supply_tz=gstr("DAILY_SUPPLY_TZ", "Europe/Moscow"),
+        timezone=gstr("TIMEZONE", gstr("DAILY_SUPPLY_TZ", "Europe/Moscow")),
+        interval_minutes=gint("INTERVAL_MINUTES", 1),
+        delay_days=gint("DELAY_DAYS", 3),
+        daily_supply_hour=gint("DAILY_SUPPLY_HOUR", 10),
+        daily_supply_minute=gint("DAILY_SUPPLY_MINUTE", 0),
+        wb_content_max_parallel=gint("WB_CONTENT_MAX_PARALLEL", 3),
+        default_reject_comment=gstr("DEFAULT_REJECT_COMMENT", "Пришлось отклонить заявку — нужно чуть больше информации."),
     )
+    return s

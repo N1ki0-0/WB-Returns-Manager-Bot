@@ -5,8 +5,9 @@ from app.application.ports import ClaimsRepoPort
 from .models import ClaimProcessing
 
 class ClaimsRepo(ClaimsRepoPort):
-    def __init__(self, sf: async_sessionmaker[AsyncSession]):
+    def __init__(self, sf: async_sessionmaker[AsyncSession], instance_name: str = "default"):
         self._sf = sf
+        self._instance_name = instance_name
 
     async def was_processed(self, claim_id: str) -> bool:
         async with self._sf() as s:

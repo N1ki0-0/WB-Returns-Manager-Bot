@@ -8,3 +8,13 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/app/data
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.tests
+    command: [ "pytest", "-q" ]
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app

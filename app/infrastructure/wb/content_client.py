@@ -1,58 +1,75 @@
 import asyncio
 import httpx
 from typing import Any
+import random
+from typing import Any
+import logging
+
+log = logging.getLogger("wb_content")
 
 class WbContentClient:
     BASE = "https://content-api.wildberries.ru"
 
-    def __init__(self, token: str, timeout: float = 30.0):
-        self._client = httpx.AsyncClient(
-            timeout=timeout,
-            headers={"Authorization": token},
-        )
+    def __init__(self, token: str, timeout: float = 30.0, max_parallel: int = 3):
+        self._client = httpx.AsyncClient(timeout=timeout, headers={"Authorization": token})
+        self._sem = asyncio.Semaphore(max_parallel)
+        self._max_parallel = max_parallel
 
-    async def close(self) -> None:
+    async def close(self):
         await self._client.aclose()
 
-    async def _post_with_rate_limit_retry(self, url: str, *, params: dict[str, Any] | None, json: dict[str, Any]) -> httpx.Response:
-        # 429: ждать X-Ratelimit-Retry секунд и повторить :contentReference[oaicite:1]{index=1}
-        max_attempts = 6
-        for attempt in range(1, max_attempts + 1):
-            r = await self._client.post(url, params=params, json=json)
-
-            if r.status_code != 429:
-                return r
-
-            # 429 handling
-            retry_s = r.headers.get("X-Ratelimit-Retry")
+    async def _post_with_rate_limit_retry(self, url: str, params=None, json=None, max_attempts: int = 6):
+        attempt = 0
+        base_sleep = 1.0
+        while True:
+            attempt += 1
             try:
-                wait = int(retry_s) if retry_s is not None else 2
-            except ValueError:
-                wait = 2
+                r = await self._client.post(url, params=params, json=json)
+            except (httpx.RequestError, httpx.ConnectError) as e:
+                log.warning("Content POST request error (attempt %s): %s", attempt, e)
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(min(30, base_sleep * (2 ** (attempt - 1)) + random.random()))
+                continue
 
-            # небольшой дополнительный буфер, чтобы не попасть снова
-            wait = max(wait, 1) + 1
+            # Logging for diagnostics
+            if r.status_code == 429:
+                log.warning("Content API 429. headers=%s body_snippet=%s", dict(r.headers), r.text[:200])
 
-            if attempt == max_attempts:
-                return r
+            if r.status_code == 429:
+                retry_s = r.headers.get("X-Ratelimit-Retry") or r.headers.get("Retry-After") or r.headers.get("X-RateLimit-Reset")
+                try:
+                    wait = int(retry_s)
+                except Exception:
+                    wait = int(min(30, base_sleep * (2 ** (attempt - 1)) + random.random()))
+                if attempt >= max_attempts:
+                    return r
+                await asyncio.sleep(wait + 1)
+                continue
 
-            await asyncio.sleep(wait)
+            if 500 <= r.status_code < 600:
+                log.warning("Content API 5xx (%s). attempt=%s", r.status_code, attempt)
+                if attempt >= max_attempts:
+                    return r
+                await asyncio.sleep(min(30, base_sleep * (2 ** (attempt - 1)) + random.random()))
+                continue
 
-        # сюда не должны попасть
-        return r
+            return r
 
-    async def find_card_by_text(self, text: str, locale: str = "ru") -> dict[str, Any]:
+    async def find_card_by_text(self, text: str, locale: str = "ru", limit: int = 100) -> dict[str, Any]:
         payload = {
             "settings": {
-                "cursor": {"limit": 150},
+                "cursor": {"limit": limit},
                 "filter": {"textSearch": text, "withPhoto": -1},
             }
         }
-
-        r = await self._post_with_rate_limit_retry(
-            f"{self.BASE}/content/v2/get/cards/list",
-            params={"locale": locale},
-            json=payload,
-        )
-        r.raise_for_status()
+        # семафор вокруг запроса: не более N параллельных вызовов
+        async with self._sem:
+            r = await self._post_with_rate_limit_retry(f"{self.BASE}/content/v2/get/cards/list", params={"locale": locale}, json=payload)
+        try:
+            r.raise_for_status()
+        except Exception:
+            # логируем полный ответ для диагностики
+            log.warning("Content API error for text=%s status=%s body=%s", text, getattr(r, "status_code", None), getattr(r, "text", "")[:1000])
+            raise
         return r.json()

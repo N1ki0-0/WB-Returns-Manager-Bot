@@ -1,6 +1,7 @@
 import asyncio
-
+import os
 from zoneinfo import ZoneInfo
+from app.infrastructure.db.repo_product_cache import ProductCacheRepo
 from aiogram import Bot, Dispatcher
 from app.infrastructure.config import load_settings
 from app.infrastructure.wb.client import WbReturnsClient
@@ -13,82 +14,102 @@ from app.infrastructure.scheduler.scheduler import make_scheduler
 from app.infrastructure.scheduler.jobs import register_jobs
 from .handlers import router, setup_handlers
 from app.presentation.telegram.notifier import TelegramNotifier
+from app.infrastructure.db.repo_orders import OrderRepo
 from app.infrastructure.wb.marketplace_client import WbMarketplaceClient
 from app.infrastructure.wb.content_client import WbContentClient
 from app.infrastructure.db.repo_daily_supply import DailySupplyRepo
 from app.application.usecases_daily_supply import CreateDailySupplyUseCase
 import logging
 logging.basicConfig(level=logging.INFO)
-
 async def main():
     settings = load_settings()
-
-    # Telegram
-    bot = Bot(token=settings.telegram_token)
-    dp = Dispatcher()
-
-    # DB
     sf, engine = make_session_factory(settings.db_url)
     await init_db(engine)
-    repo = ClaimsRepo(sf)
 
-    # WB
-    wb_client = WbReturnsClient(settings.wb_token)
-    wb = WbReturnsAdapter(wb_client)
+    scheduler = make_scheduler(settings.daily_supply_tz)
+    scheduler.start()
 
-    # Notifier
-    notifier = TelegramNotifier(bot=bot, admin_ids=settings.admin_ids)
+    tasks = []
 
-    mp_client = WbMarketplaceClient(settings.wb_token)
-    content_client = WbContentClient(settings.wb_token)
+    for acct in settings.accounts:
+        instance_name = acct.name
 
-    daily_repo = DailySupplyRepo(sf)
+        # --- Telegram ---
+        bot = Bot(token=acct.telegram_token)
+        dp = Dispatcher()
 
-    # Use case
-    rule = AutoRejectRule(delay_days=settings.delay_days)
-    usecase = ProcessClaimsUseCase(
-        wb=wb,
-        repo=repo,
-        rule=rule,
-        default_comment=settings.default_reject_comment,
-        enabled=settings.auto_enabled,
-        notifier=notifier,
-    )
+        notifier = TelegramNotifier(bot=bot, admin_ids=acct.admin_ids)
 
-    daily_supply_usecase = CreateDailySupplyUseCase(
-        marketplace_client=mp_client,
-        content_client=content_client,
-        daily_repo=daily_repo,
-        notifier=notifier,
-        tz=getattr(settings, "timezone", "Europe/Moscow"),  # см. settings ниже
-        enabled=getattr(settings, "daily_supply_enabled", True),
-    )
+        # --- WB clients ---
+        wb_client = WbReturnsClient(acct.wb_token)
+        wb_adapter = WbReturnsAdapter(wb_client)
 
-    # Scheduler
-    sched = make_scheduler(settings.timezone)
-    register_jobs(
-        sched,
-        returns_usecase=usecase,
-        returns_interval_minutes=settings.interval_minutes,
-        daily_supply_usecase=daily_supply_usecase,
-        daily_hour=getattr(settings, "daily_supply_hour", 9),
-        daily_minute=getattr(settings, "daily_supply_minute", 30),
-        timezone=getattr(settings, "timezone", "Europe/Moscow"),
-    )
-    sched.start()
+        mp_client = WbMarketplaceClient(acct.wb_token)
+        content_client = WbContentClient(acct.wb_token)
 
+        # --- repos ---
+        claims_repo = ClaimsRepo(sf, instance_name=instance_name)
+        order_repo = OrderRepo(sf, instance_name=instance_name)
+        product_cache_repo = ProductCacheRepo(sf, instance_name=instance_name)
+        daily_repo = DailySupplyRepo(sf, instance_name=instance_name)
 
-    setup_handlers(router, usecase, settings.admin_ids, daily_supply_usecase=daily_supply_usecase, daily_repo=daily_repo)
-    dp.include_router(router)
+        # --- rules ---
+        rule = AutoRejectRule(delay_days=settings.delay_days)
+
+        # --- RETURNS USECASE ---
+        usecase = ProcessClaimsUseCase(
+            wb=wb_adapter,
+            repo=claims_repo,
+            rule=rule,
+            default_comment=settings.default_comment,
+            enabled=settings.enabled,
+            notifier=notifier,
+        )
+
+        # --- DAILY SUPPLY USECASE ---
+        daily_supply_usecase = CreateDailySupplyUseCase(
+            marketplace_client=mp_client,
+            content_client=content_client,
+            daily_repo=daily_repo,
+            notifier=notifier,
+            tz=settings.daily_supply_tz,
+            enabled=True,
+            product_cache_repo=product_cache_repo,
+        )
+
+        # --- handlers ---
+        setup_handlers(
+            dp,
+            usecase=usecase,
+            daily_supply_usecase=daily_supply_usecase,
+            instance_name=instance_name,
+        )
+
+        # --- scheduler ---
+        register_jobs(
+            scheduler,
+            returns_usecase=usecase,
+            returns_interval_minutes=settings.interval_minutes,
+            daily_supply_usecase=daily_supply_usecase,
+            daily_hour=settings.daily_supply_hour,
+            daily_minute=settings.daily_supply_minute,
+            timezone=settings.timezone,
+            instance_name=instance_name,
+        )
+
+        # --- polling ---
+        task = asyncio.create_task(dp.start_polling(bot))
+        tasks.append((instance_name, task, bot, mp_client, content_client))
 
     try:
-        await dp.start_polling(bot)
+        await asyncio.gather(*(t for _, t, *_ in tasks))
     finally:
-        await wb_client.close()
-        await bot.session.close()
+        for instance, task, bot, mp_client, content_client in tasks:
+            await bot.session.close()
+            await mp_client.close()
+            await content_client.close()
+
         await engine.dispose()
-        await mp_client.close()
-        await content_client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
