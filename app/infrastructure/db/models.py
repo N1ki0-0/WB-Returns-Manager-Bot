@@ -8,6 +8,7 @@ class Base(DeclarativeBase):
 class ClaimProcessing(Base):
     __tablename__ = "claim_processing"
     claim_id: Mapped[str] = mapped_column(String, primary_key=True)
+    instance_name = Column(String, nullable=False, index=True, default="default")
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     action: Mapped[str | None] = mapped_column(String, nullable=True)
     processed_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)

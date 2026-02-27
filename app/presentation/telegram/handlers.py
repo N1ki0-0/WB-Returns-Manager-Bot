@@ -1,52 +1,123 @@
-from aiogram import Router, F
+from aiogram import Router, F, Dispatcher
 from aiogram.types import Message
-from app.application.usecases import ProcessClaimsUseCase
 
-router = Router()
 
 def _is_admin(message: Message, admin_ids: set[int]) -> bool:
     return message.from_user and message.from_user.id in admin_ids
 
-def setup_handlers(router: Router, returns_usecase, admin_ids: set[int], daily_supply_usecase=None, daily_repo=None):
+
+def setup_handlers(dp: Dispatcher, accounts_registry: dict):
+    """
+    accounts_registry = {
+        "acc1": {
+            "returns": usecase,
+            "daily": daily_usecase,
+            "repo": repo,
+            "admins": set(...)
+        }
+    }
+    """
+
+    router = Router()
+
+    # --- helper ---
+    def _get_account(name: str):
+        return accounts_registry.get(name)
+
+    # --- ping ---
     @router.message(F.text == "/ping")
     async def ping(m: Message):
-        if not _is_admin(m, admin_ids):
-            return
         await m.answer("ok")
 
-    @router.message(F.text == "/run")
+    # --- list accounts ---
+    @router.message(F.text == "/accounts")
+    async def accounts(m: Message):
+        names = "\n".join(accounts_registry.keys())
+        await m.answer(f"Аккаунты:\n{names}")
+
+    # --- run returns ---
+    @router.message(F.text.startswith("/run"))
     async def run(m: Message):
-        if not _is_admin(m, admin_ids):
+        parts = m.text.split()
+
+        if len(parts) < 2:
+            await m.answer("Используй: /run ACCOUNT")
             return
-        res = await returns_usecase.run()
+
+        name = parts[1]
+        acc = _get_account(name)
+
+        if not acc:
+            await m.answer("Аккаунт не найден")
+            return
+
+        if not _is_admin(m, acc["admins"]):
+            return
+
+        res = await acc["returns"].run()
+
         await m.answer(
-            f"Готово.\n"
+            f"{name}:\n"
             f"Проверено: {res.checked}\n"
             f"Обработано: {res.processed}\n"
-            f"Пропущено (уже было): {res.skipped_already_done}\n"
             f"Ошибок: {res.errors}"
         )
 
-    @router.message(F.text == "/supply_run")
+    # --- supply run ---
+    @router.message(F.text.startswith("/supply_run"))
     async def supply_run(m: Message):
-        if not _is_admin(m, admin_ids) or daily_supply_usecase is None:
-            return
-        res = await daily_supply_usecase.run()
-        await m.answer("Supply job выполнен.\n" + "\n".join(res.lines))
+        parts = m.text.split()
 
-    @router.message(F.text == "/last_supply")
+        if len(parts) < 2:
+            await m.answer("Используй: /supply_run ACCOUNT")
+            return
+
+        name = parts[1]
+        acc = _get_account(name)
+
+        if not acc or "daily" not in acc:
+            await m.answer("Аккаунт не найден")
+            return
+
+        if not _is_admin(m, acc["admins"]):
+            return
+
+        res = await acc["daily"].run()
+
+        await m.answer(
+            f"{name} supply:\n" + "\n".join(res.lines)
+        )
+
+    # --- last supply ---
+    @router.message(F.text.startswith("/last_supply"))
     async def last_supply(m: Message):
-        if not _is_admin(m, admin_ids) or daily_repo is None:
+        parts = m.text.split()
+
+        if len(parts) < 2:
+            await m.answer("Используй: /last_supply ACCOUNT")
             return
 
-        row = await daily_repo.get_last_report()
-        if row is None or not row.report_text:
-            await m.answer("Нет данных о поставках (ещё не создавались или не сохранён отчёт).")
+        name = parts[1]
+        acc = _get_account(name)
+
+        if not acc or "repo" not in acc:
+            await m.answer("Аккаунт не найден")
             return
 
-        # Telegram лимит на сообщение ~4096 символов
+        if not _is_admin(m, acc["admins"]):
+            return
+
+        row = await acc["repo"].get_last_report()
+
+        if not row or not row.report_text:
+            await m.answer("Нет данных")
+            return
+
         text = row.report_text
+
         if len(text) <= 3800:
             await m.answer(text)
         else:
-            await m.answer(text[:3800] + "\n...\n(сообщение обрезано)")
+            await m.answer(text[:3800] + "\n...\n(обрезано)")
+
+    dp.include_router(router)

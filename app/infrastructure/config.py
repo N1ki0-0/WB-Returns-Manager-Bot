@@ -23,6 +23,7 @@ class Settings:
     daily_supply_minute: int
     wb_content_max_parallel: int
     default_reject_comment: str
+    enabled: bool
 
 def _parse_accounts(raw: Optional[str]) -> List[AccountConfig]:
     if not raw:
@@ -85,6 +86,12 @@ def load_settings(env_file: str = ".env") -> Settings:
         v = os.getenv(name)
         return v if v and v.strip() != "" else default
 
+    def gbool(name: str, default: bool) -> bool:
+        v = os.getenv(name)
+        if v is None:
+            return default
+        return v.lower() in ("1", "true", "yes", "on")
+
     s = Settings(
         accounts=accounts,
         db_url=gstr("DB_URL", "sqlite+aiosqlite:///./data/data.db"),
@@ -96,5 +103,6 @@ def load_settings(env_file: str = ".env") -> Settings:
         daily_supply_minute=gint("DAILY_SUPPLY_MINUTE", 0),
         wb_content_max_parallel=gint("WB_CONTENT_MAX_PARALLEL", 3),
         default_reject_comment=gstr("DEFAULT_REJECT_COMMENT", "Пришлось отклонить заявку — нужно чуть больше информации."),
+        enabled=gbool("DAILY_SUPPLY_ENABLED", True),
     )
     return s

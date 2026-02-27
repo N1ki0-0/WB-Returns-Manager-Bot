@@ -19,13 +19,20 @@ _COLOR_MAP = {
     "фиол": "purple", "фиол.": "purple", "фиолетовый": "purple",
 }
 
+
 _MODEL_PATTERNS = [
-    # Samsung Axx / Cxx и т.п.
+    # Samsung Axx / Cxx
     re.compile(r"\b([ac]\d{2})\b", re.IGNORECASE),      # A25, C85
     re.compile(r"\b(a\d{2}c)\b", re.IGNORECASE),        # A15C
-    # Redmi / просто "12", "13"
-    re.compile(r"\b(note\s*\d+)\b", re.IGNORECASE),     # Note 13
-    re.compile(r"\b(\d{2})\b"),                         # 12, 13, 15
+
+    # Новый паттерн: 15C
+    re.compile(r"\b(\d{2}c)\b", re.IGNORECASE),         # 15C
+
+    # Redmi Note
+    re.compile(r"\b(note\s*\d+)\b", re.IGNORECASE),
+
+    # Просто число
+    re.compile(r"\b(\d{2})\b"),
 ]
 
 def _extract_color(title: str) -> str | None:

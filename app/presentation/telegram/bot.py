@@ -12,7 +12,7 @@ from app.domain.rules import AutoRejectRule
 from app.application.usecases import ProcessClaimsUseCase
 from app.infrastructure.scheduler.scheduler import make_scheduler
 from app.infrastructure.scheduler.jobs import register_jobs
-from .handlers import router, setup_handlers
+from .handlers import setup_handlers
 from app.presentation.telegram.notifier import TelegramNotifier
 from app.infrastructure.db.repo_orders import OrderRepo
 from app.infrastructure.wb.marketplace_client import WbMarketplaceClient
@@ -23,20 +23,25 @@ import logging
 logging.basicConfig(level=logging.INFO)
 async def main():
     settings = load_settings()
+
+    # --- DB ---
     sf, engine = make_session_factory(settings.db_url)
     await init_db(engine)
 
+    # --- Scheduler ---
     scheduler = make_scheduler(settings.daily_supply_tz)
     scheduler.start()
 
-    tasks = []
+    # 🚨 Telegram создаётся ОДИН раз
+    first_account = settings.accounts[0]
+    bot = Bot(token=first_account.telegram_token)
+    dp = Dispatcher()
+
+    # registry всех аккаунтов
+    accounts_registry = {}
 
     for acct in settings.accounts:
         instance_name = acct.name
-
-        # --- Telegram ---
-        bot = Bot(token=acct.telegram_token)
-        dp = Dispatcher()
 
         notifier = TelegramNotifier(bot=bot, admin_ids=acct.admin_ids)
 
@@ -56,17 +61,16 @@ async def main():
         # --- rules ---
         rule = AutoRejectRule(delay_days=settings.delay_days)
 
-        # --- RETURNS USECASE ---
-        usecase = ProcessClaimsUseCase(
+        # --- usecases ---
+        returns_usecase = ProcessClaimsUseCase(
             wb=wb_adapter,
             repo=claims_repo,
             rule=rule,
-            default_comment=settings.default_comment,
+            default_comment=settings.default_reject_comment,
             enabled=settings.enabled,
             notifier=notifier,
         )
 
-        # --- DAILY SUPPLY USECASE ---
         daily_supply_usecase = CreateDailySupplyUseCase(
             marketplace_client=mp_client,
             content_client=content_client,
@@ -77,18 +81,19 @@ async def main():
             product_cache_repo=product_cache_repo,
         )
 
-        # --- handlers ---
-        setup_handlers(
-            dp,
-            usecase=usecase,
-            daily_supply_usecase=daily_supply_usecase,
-            instance_name=instance_name,
-        )
+        # сохраняем в registry
+        accounts_registry[instance_name] = {
+            "returns": returns_usecase,
+            "daily": daily_supply_usecase,
+            "repo": daily_repo,
+            "admins": set(acct.admin_ids),
+            "clients": (mp_client, content_client),
+        }
 
-        # --- scheduler ---
+        # scheduler jobs
         register_jobs(
             scheduler,
-            returns_usecase=usecase,
+            returns_usecase=returns_usecase,
             returns_interval_minutes=settings.interval_minutes,
             daily_supply_usecase=daily_supply_usecase,
             daily_hour=settings.daily_supply_hour,
@@ -97,19 +102,22 @@ async def main():
             instance_name=instance_name,
         )
 
-        # --- polling ---
-        task = asyncio.create_task(dp.start_polling(bot))
-        tasks.append((instance_name, task, bot, mp_client, content_client))
+    # handlers получают registry
+    setup_handlers(dp, accounts_registry)
 
     try:
-        await asyncio.gather(*(t for _, t, *_ in tasks))
+        await dp.start_polling(bot)
     finally:
-        for instance, task, bot, mp_client, content_client in tasks:
-            await bot.session.close()
-            await mp_client.close()
-            await content_client.close()
+        await bot.session.close()
+
+        for acc in accounts_registry.values():
+            mp, content = acc["clients"]
+            await mp.close()
+            await content.close()
 
         await engine.dispose()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
